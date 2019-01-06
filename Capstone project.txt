@@ -1,0 +1,599 @@
+library(Information)
+library(ggplot2)
+library(dplyr)
+library(caret)
+library(caTools)
+library(MASS)
+library(unbalanced)
+library(car)
+library(AtConP)
+library(randomForest)
+library(ROCR)
+library(ROSE)
+
+######################### Data prep ##############################################################
+
+# Load data sets
+CB <- read.csv("Credit Bureau data.csv")
+
+Demo <- read.csv("Demographic data.csv")
+
+# Check for NAs
+apply(is.na(MasterData),2,sum)
+
+#check for duplicate records
+Demo$Application.ID[duplicated(Demo$Application.ID) | duplicated(Demo$Application.ID, fromLast=TRUE)]
+
+
+# Merge the datasets 
+MasterData <- merge(Demo,CB,by = "Application.ID")
+MasterData <- MasterData[,- 12]
+colnames(MasterData)[29] <- "Performance.Tag"
+
+
+
+#### Remove duplicate Apllication IDs #####
+
+
+MasterData <- MasterData[MasterData$Application.ID != "765011468",]
+MasterData <- MasterData[MasterData$Application.ID != "634180637",]
+MasterData <- MasterData[MasterData$Application.ID != "671989187",]
+MasterData <- MasterData[MasterData$Application.ID != "653287861",]
+
+### impute missing values with mean ##########
+
+MasterData$No.of.dependents[is.na(MasterData$No.of.dependents)] <- 1
+MasterData$No.of.dependents <- factor(MasterData$No.of.dependents)
+
+
+MasterData$Age[MasterData$Age == "0"] <- "50"
+MasterData$Age <- as.numeric(MasterData$Age)
+MasterData$Age <- as.factor(cut(MasterData$Age, breaks = c(14, 25, 35, 45, 66)))
+
+summary(MasterData$Gender)
+MasterData$Gender[MasterData$Gender==""] <- "M"
+MasterData$Gender <- factor(MasterData$Gender)
+
+summary(MasterData$Education)
+MasterData$Education[MasterData$Education == ""] <- "Professional"
+MasterData$Education <- factor(MasterData$Education)
+
+summary(MasterData$Profession)
+MasterData$Profession[MasterData$Profession == ""] <- "SAL"
+MasterData$Profession <- factor(MasterData$Profession)
+
+summary(MasterData$Type.of.residence)
+MasterData$Type.of.residence[MasterData$Type.of.residence == ""] <- "Rented"
+MasterData$Type.of.residence <- factor(MasterData$Type.of.residence)
+
+
+# Outlier treatment
+boxplot(Demo$No.of.months.in.current.company)
+
+MasterData[(which(MasterData$No.of.months.in.current.company>100)),]$No.of.months.in.current.company <- 100
+MasterData$No.of.months.in.current.company <- as.factor(cut(MasterData$No.of.months.in.current.company, 
+                                                      breaks = c(2, 12, 24,36, 50,101)))
+
+
+
+MasterData$Marital.Status..at.the.time.of.application.[MasterData$Marital.Status..at.the.time.of.application. == ""] <- "Married"
+MasterData$Marital.Status..at.the.time.of.application. <- factor(MasterData$Marital.Status..at.the.time.of.application.)
+
+
+MasterData$Income[MasterData$Income == -0.5 ] <- 1
+MasterData$Income[MasterData$Income == 0 ] <- 1
+
+## Cap outliers ########
+
+boxplot(MasterData$Income)
+quant <- quantile(MasterData$Income, probs = c(0.01,0.99))
+MasterData$Income[which((MasterData$Income < 4.5))] <- 4.5 
+
+boxplot(MasterData$Total.No.of.Trades)
+quantile(MasterData$Total.No.of.Trades, probs = c(0.01,0.99))
+
+
+quantile(MasterData$No.of.PL.trades.opened.in.last.12.months, seq(0,1,0.01))
+MasterData$No.of.PL.trades.opened.in.last.12.months[which((MasterData$No.of.PL.trades.opened.in.last.12.months > 9))] <- 9
+MasterData$No.of.PL.trades.opened.in.last.12.months <- as.factor(MasterData$No.of.PL.trades.opened.in.last.12.months)
+
+quantile(MasterData$No.of.times.30.DPD.or.worse.in.last.12.months, seq(0,1,0.01))
+MasterData$No.of.times.30.DPD.or.worse.in.last.12.months[which((MasterData$No.of.times.30.DPD.or.worse.in.last.12.months > 6))] <- 6
+
+quantile(MasterData$No.of.trades.opened.in.last.6.months, seq(0,1,0.01), na.rm = T)
+MasterData$No.of.trades.opened.in.last.6.months[which((MasterData$No.of.trades.opened.in.last.6.months > 9))] <- 9
+MasterData$No.of.trades.opened.in.last.6.months[is.na(MasterData$No.of.trades.opened.in.last.6.months)] <- 2
+
+MasterData$No.of.times.30.DPD.or.worse.in.last.6.months[which((MasterData$No.of.times.30.DPD.or.worse.in.last.6.months > 6))] <- 6
+
+quantile(MasterData$No.of.trades.opened.in.last.12.months, seq(0,1,0.01), na.rm = T)
+MasterData$No.of.trades.opened.in.last.12.months[which((MasterData$No.of.trades.opened.in.last.12.months > 21))] <- 21
+MasterData$No.of.trades.opened.in.last.12.months <- as.factor(cut(MasterData$No.of.trades.opened.in.last.12.months,breaks = c(0,5,10,15,22), include.lowest = T))
+
+MasterData$Total.No.of.Trades[which((MasterData$Total.No.of.Trades > 31))] <- 31
+MasterData$Total.No.of.Trades <- as.factor(cut(MasterData$Total.No.of.Trades, breaks = c(0,5,10,15,32), include.lowest = T))
+
+quantile(MasterData$No.of.Inquiries.in.last.12.months..excluding.home...auto.loans., seq(0,1,0.01), na.rm = T)
+MasterData$No.of.Inquiries.in.last.12.months..excluding.home...auto.loans.[which((MasterData$No.of.Inquiries.in.last.12.months..excluding.home...auto.loans. > 6))] <- 6
+MasterData$No.of.Inquiries.in.last.12.months..excluding.home...auto.loans. <- factor(MasterData$No.of.Inquiries.in.last.12.months..excluding.home...auto.loans.)
+
+quantile(MasterData$No.of.Inquiries.in.last.6.months..excluding.home...auto.loans., seq(0,1,0.01), na.rm = T)
+MasterData$No.of.Inquiries.in.last.6.months..excluding.home...auto.loans.[which((MasterData$No.of.Inquiries.in.last.6.months..excluding.home...auto.loans. > 6))] <- 6
+MasterData$No.of.Inquiries.in.last.6.months..excluding.home...auto.loans. <- factor(MasterData$No.of.Inquiries.in.last.6.months..excluding.home...auto.loans.)
+
+
+summary(MasterData$Avgas.CC.Utilization.in.last.12.months)
+
+quantile(MasterData$Avgas.CC.Utilization.in.last.12.months, seq(0,1,0.01), na.rm = T)
+MasterData$Avgas.CC.Utilization.in.last.12.months[is.na(MasterData$Avgas.CC.Utilization.in.last.12.months)] <- 15
+
+MasterData$Avgas.CC.Utilization.in.last.12.months[is.na(MasterData$Avgas.CC.Utilization.in.last.12.months)] <- 15
+
+MasterData$Avgas.CC.Utilization.in.last.12.months[which((MasterData$Avgas.CC.Utilization.in.last.12.months > 100))] <- 100
+MasterData$Avgas.CC.Utilization.in.last.12.months <- as.factor(cut(MasterData$Avgas.CC.Utilization.in.last.12.months,breaks = c(0,7,12,23,53,101),include.lowest = TRUE))
+
+
+quantile(MasterData$No.of.times.60.DPD.or.worse.in.last.12.months, seq(0,1,0.01))
+
+MasterData$No.of.times.30.DPD.or.worse.in.last.6.months <- factor(MasterData$No.of.times.30.DPD.or.worse.in.last.6.months)
+MasterData$No.of.times.60.DPD.or.worse.in.last.6.months <- factor(MasterData$No.of.times.60.DPD.or.worse.in.last.6.months)
+MasterData$No.of.times.90.DPD.or.worse.in.last.6.months <- factor(MasterData$No.of.times.90.DPD.or.worse.in.last.6.months)
+
+
+MasterData$No.of.times.30.DPD.or.worse.in.last.12.months <- factor(MasterData$No.of.times.30.DPD.or.worse.in.last.12.months)
+
+MasterData$No.of.times.60.DPD.or.worse.in.last.12.months <- factor(MasterData$No.of.times.60.DPD.or.worse.in.last.12.months)
+MasterData$No.of.times.60.DPD.or.worse.in.last.12.months <- as.numeric(MasterData$No.of.times.60.DPD.or.worse.in.last.12.months)
+MasterData <- MasterData[MasterData$No.of.times.60.DPD.or.worse.in.last.12.months < 5,]
+
+MasterData$No.of.times.90.DPD.or.worse.in.last.12.months <- factor(MasterData$No.of.times.90.DPD.or.worse.in.last.12.months)
+
+### Discretize variables for generalized model ######
+
+MasterData$Presence.of.open.auto.loan <- factor(MasterData$Presence.of.open.auto.loan)
+MasterData$Presence.of.open.home.loan <- factor(MasterData$Presence.of.open.home.loan)
+MasterData$No.of.Inquiries.in.last.6.months..excluding.home...auto.loans. <- factor(MasterData$No.of.Inquiries.in.last.6.months..excluding.home...auto.loans.)
+
+
+MasterData$No.of.trades.opened.in.last.6.months <- as.factor(MasterData$No.of.trades.opened.in.last.6.months)
+MasterData$No.of.PL.trades.opened.in.last.6.months <- as.factor(MasterData$No.of.PL.trades.opened.in.last.6.months)
+MasterData$No.of.times.60.DPD.or.worse.in.last.12.months <- as.factor(MasterData$No.of.times.60.DPD.or.worse.in.last.12.months)
+
+
+MasterData <- MasterData[!is.na(MasterData$Outstanding.Balance),]
+MasterData$Outstanding.Balance[which(MasterData$Outstanding.Balance < 605)] <- 605
+MasterData$Outstanding.Balance[which(MasterData$Outstanding.Balance > 4249680)] <- 4249680
+
+quantile(MasterData$Outstanding.Balance, seq(0,1,0.01))
+MasterData$Outstanding.Balance <- as.factor(cut(MasterData$Outstanding.Balance, breaks = c(0,25000,590000,980000,2970000,4250000)))
+
+# Set aside dataset where Loan status is NA for Rejection inference
+RejectData <- MasterData[is.na(MasterData$Performance.Tag),]
+RejectData <- RejectData[,-1]
+
+RejectData <- RejectData[,-c(1,2,3,4,5,6,7,8,9,10,23,24,25,26,27)]
+
+# Remove records with NAs in Tag
+MasterData <- MasterData[!is.na(MasterData$Performance.Tag),]
+
+
+########################## EDA ##########################################################################
+
+
+#### Remove insignificant variables using IV ######################################################################
+### Remove Multicollinear variables ########################################
+
+MasterData1 <- MasterData[,-1]
+
+IV <- create_infotables(data= MasterData1,y= "Performance.Tag",bins=10,parallel = FALSE)
+
+print(IV$Summary)
+
+plot_infotables(IV, IV$Summary$Variable[1:6], same_scale=FALSE)
+
+plot_infotables(IV, IV$Summary$Variable[7:12], same_scale=FALSE)
+
+
+
+## Retain only medium and strong predictors : IV cut-off set as 0.14 
+
+MasterData1 <- MasterData1[,-c(1,2,3,4,5,6,7,8,9,10,23,24,25,26,27)]
+
+
+############## Impute with WOE Analysis ##############################################################
+
+IV_Value = data.frame(IV$Summary)
+
+
+woe_data <- DF.Replace.WOE( MasterData1 ,IV, "Performance.Tag")
+
+
+summary(woe_data)
+
+
+woe.final <- woe_data
+
+names(woe.final)[1:13] <- c("No.of.times.90.DPD.or.worse.in.last.6.months", 
+                            "No.of.times.60.DPD.or.worse.in.last.6.months", 
+                            "No.of.times.30.DPD.or.worse.in.last.6.months", 
+                            "No.of.times.90.DPD.or.worse.in.last.12.months",
+                            
+                            "No.of.times.60.DPD.or.worse.in.last.12.months", 
+                            "No.of.times.30.DPD.or.worse.in.last.12.months",
+                            "Avgas.CC.Utilization.in.last.12.months", 
+                            "No.of.trades.opened.in.last.6.months", 
+                            "No.of.trades.opened.in.last.12.months",
+                            "No.of.PL.trades.opened.in.last.6.months",
+                            "No.of.PL.trades.opened.in.last.12.months",
+                            "No.of.Inquiries.in.last.6.months..excluding.home...auto.loans", 
+                            "Performance.Tag")
+
+
+ #########################################################
+ #### Logistic Regression model ##########################
+ 
+set.seed(100)
+split_indices <- sample.split(woe.final$Performance.Tag, SplitRatio = 0.70)
+train <- woe.final[split_indices, ]
+test <- woe.final[!split_indices, ]
+
+ logistic_1 <- glm(Performance.Tag ~ ., family = "binomial", data = train)
+ summary(logistic_1)
+ 
+ logistic_2 <- stepAIC(logistic_1, direction = "both")
+ summary(logistic_2)
+ 
+ logistic_3 <- glm(formula = Performance.Tag ~ No.of.times.90.DPD.or.worse.in.last.12.months + 
+                   No.of.times.30.DPD.or.worse.in.last.12.months + Avgas.CC.Utilization.in.last.12.months + 
+                   No.of.PL.trades.opened.in.last.12.months + No.of.Inquiries.in.last.6.months..excluding.home...auto.loans, 
+                   family = "binomial", data = train)
+ 
+ 
+summary(logistic_3)
+
+
+logistic_final <- logistic_3
+
+# Predicting probabilities of responding for the test data
+
+predictions_logit <- predict(logistic_final, newdata = test, type = "response")
+
+# Creating confusion matrix for identifying the model evaluation.
+
+predicted_response <- factor(ifelse(predictions_logit >= 0.052, "yes", "no"))
+
+conf <- confusionMatrix(predicted_response, test$Performance.Tag, positive = "yes")
+
+conf
+
+#### Accuracy : 0.6965 Sensitivity : 0.553 Specificity : 0.70395  ####
+
+
+################  Balancing / Train data ###########################################
+
+
+
+wbalData<- ROSE(Performance.Tag ~ ., data = train, seed = 1)$data
+               ## no   yes    ##
+               ## 23827 23792 ##
+               
+############## Regression Model with balanced Train data ##############################################
+
+
+
+logistic_1_bal <- glm( Performance.Tag ~ ., family = "binomial", data = wbalData)
+summary(logistic_1_bal)
+
+logistic_2_bal <- stepAIC(logistic_1_bal, direction = "both")
+
+summary(logistic_2_bal)
+
+vif(logistic_2_bal)
+
+logistic_3_bal <- glm(formula = Performance.Tag ~ No.of.times.60.DPD.or.worse.in.last.6.months + 
+                        No.of.times.30.DPD.or.worse.in.last.6.months + No.of.times.90.DPD.or.worse.in.last.12.months + 
+                        Avgas.CC.Utilization.in.last.12.months + No.of.trades.opened.in.last.6.months + 
+                        No.of.trades.opened.in.last.12.months + No.of.PL.trades.opened.in.last.12.months + 
+                        No.of.Inquiries.in.last.6.months..excluding.home...auto.loans, 
+                      family = "binomial", data = wbalData)
+
+logistic_final_bal <- logistic_3_bal
+
+predictions_logit_bal <- predict(logistic_final_bal, newdata = test, type = "response")
+
+predicted_response_bal <- factor(ifelse(predictions_logit_bal >= 0.55, "yes", "no"))
+
+conf.bal.lgs <- confusionMatrix(predicted_response_bal, test$Performance.Tag, positive = "yes")
+
+conf.bal.lgs
+
+## Accuracy : 0.68 Sensitivity : 0.55 Specificity : 0.68 ###
+
+# AUC
+
+Predobj.lgs.bal <- ROCR::prediction(predictions_logit_bal,test$Performance.Tag)
+auc.lgs.bal <- ROCR::performance(Predobj.lgs.bal,'auc')
+auc.lgs.bal <- unlist(slot(auc.lgs.bal,'y.values'))
+auc.lgs.bal # 0.6639858
+
+
+### Predict response for MasterData ######################
+
+predictions_logit_master <- predict(logistic_final, newdata = woe.final, type = "response")
+
+predicted_response_mas <- factor(ifelse(predictions_logit_master >= 0.55, "yes", "no"))
+
+conf.bal.lgs.master <- confusionMatrix(predicted_response_mas, woe.final$Performance.Tag, positive = "yes")
+
+conf.bal.lgs.master
+
+###  Accuracy : 0.68 Sensitivity : 0.54  Specificity : 0.69
+
+## Model stands the prediction test on MasterData indicating stability but low on sensitivity
+## Lift & Gain Charts 
+
+lgs_LG_data <- test
+lgs_LG_data$pred.resp <- predicted_response_bal
+lgs_LG_data$pred.prob <- predictions_logit_bal
+
+lgs_LG_data <- lgs_LG_data[order(lgs_LG_data$pred.prob,decreasing = T),]
+
+lift <- function(labels , predicted_prob, groups = 10) {
+        if(is.factor(labels)) labels  <- as.integer(as.character(labels ))
+        if(is.factor(predicted_prob)) predicted_prob <- as.integer(as.character(predicted_prob))
+         helper = data.frame(cbind(labels , predicted_prob))
+         helper[, 'bucket'] = ntile(-helper[, 'predicted_prob'], groups)
+         gaintable = helper %>% group_by(bucket) %>%
+         summarise_at(vars(labels ), funs(total = n(), totalresp = sum(., na.rm = TRUE))) %>%
+         mutate(Cumresp = cumsum(totalresp), Gain = Cumresp / sum(totalresp) * 100, Cumlift = Gain / (bucket * (100 / groups)))
+         return(gaintable)
+}
+
+lgs_LG_data$Performance.Tag <- as.factor(ifelse(lgs_LG_data$Performance.Tag == 'yes',1,0))
+LG.lgs <- lift(lgs_LG_data$Performance.Tag, lgs_LG_data$pred.prob, groups = 10)
+ 
+View(LG.lgs)
+
+## KS stats
+
+lgs_response <- ifelse(lgs_LG_data$Performance.Tag == 1,1,0)
+lgs_predict <- ifelse(lgs_LG_data$pred.resp == 'yes',1,0)
+predObj.lgs <- ROCR::prediction(lgs_response,lgs_predict)
+tpr_fpr_lgs <- ROCR::performance(Predobj.lgs.bal,'tpr','fpr')
+perf.metrics <- ROCR::performance(predObj.lgs, 'tpr','fpr')
+ks_table_lgs <- attr(perf.metrics,'y.values')[[1]] - attr(perf.metrics,'x.values')[[1]]
+max(ks_table_lgs) # 0.04284857
+
+## KS stats is not acceptable for Lgs regression model
+
+###################### Random Forrest ###################################################################
+
+set.seed(101)
+split_indices <- sample.split(MasterData1$Performance.Tag, SplitRatio = 0.70)
+
+train_rf <- MasterData1[split_indices, ]
+test_rf <- MasterData1[!split_indices, ]
+
+
+data.rose <- ROSE(Performance.Tag ~ ., data = train_rf, seed = 1)$data
+data.rose$Performance.Tag <- factor(data.rose$Performance.Tag)
+
+RFdata <- randomForest(Performance.Tag ~., data = data.rose)
+
+#### Predict response #################
+test_rf$Performance.Tag <- factor(test_rf$Performance.Tag)
+
+testPred <- predict(RFdata,newdata = test_rf, type = "prob")
+testPred <- factor(ifelse(testPred[,2] >= '0.33', "yes", "no"))
+
+test_rf$Performance.Tag <- as.factor(ifelse(test_rf$Performance.Tag == 1, "yes", "no"))
+
+conf_forest.33 <- confusionMatrix(testPred, test_rf$Performance.Tag)
+
+conf_forest.33
+
+### ACC: 0.7045 SENS : 0.71228  SPEC : 0.56566  #################################
+
+
+
+PredObj <- ROCR::prediction(testPred[, 2], test_rf$Performance.Tag)
+
+auc <- ROCR::performance(PredObj,'auc')
+auc <- unlist(slot(auc, 'y.values'))
+auc
+
+##  0.6954209
+
+############## Impute with WOE Analysis ##############################################################
+
+IV <- create_infotables(data=MasterData1, y="Performance.Tag", bins=10, parallel=FALSE)
+
+woe_data <- DF.Replace.WOE( MasterData1 ,IV, "Performance.Tag")
+
+
+summary(woe_data)
+
+
+woe.final <- woe_data
+
+names(woe.final)[1:13] <- c("No.of.times.90.DPD.or.worse.in.last.6.months", 
+                            "No.of.times.60.DPD.or.worse.in.last.6.months", 
+                            "No.of.times.30.DPD.or.worse.in.last.6.months", 
+                            "No.of.times.90.DPD.or.worse.in.last.12.months",
+                            
+                            "No.of.times.60.DPD.or.worse.in.last.12.months", 
+                            "No.of.times.30.DPD.or.worse.in.last.12.months",
+                            "Avgas.CC.Utilization.in.last.12.months", 
+                            "No.of.trades.opened.in.last.6.months", 
+                            "No.of.trades.opened.in.last.12.months",
+                            "No.of.PL.trades.opened.in.last.6.months",
+                            "No.of.PL.trades.opened.in.last.12.months",
+                            "No.of.Inquiries.in.last.6.months..excluding.home...auto.loans", 
+                            "Performance.Tag")
+
+woe.final$Performance.Tag <- as.factor(ifelse(woe.final$Performance.Tag == 1, 'yes','no' ))
+
+set.seed(71)
+split_indices <- sample.split(woe.final$Performance.Tag, SplitRatio = 0.70)
+
+train_rf <- woe.final[split_indices, ]
+test_rf <- woe.final[!split_indices, ]
+
+
+
+RFwoebaldata <- randomForest(Performance.Tag ~., data = woe.bal)
+
+#### Predict response #################
+
+testPred.bal.rf <- predict(RFwoebaldata,newdata = test_rf, type = "prob")
+testPred.Resp.bal.rf <- factor(ifelse(testPred.bal.rf[,2] >= '0.16', "yes", "no"))
+
+conf_forest.16.woe.bal <- confusionMatrix(testPred.Resp.bal.rf, test_rf$Performance.Tag)
+
+conf_forest.16.woe.bal
+
+#### ACC: 0.7076 Sens : 0.71596 Spec: 0.5113 ###############
+
+#### Prediction for Master dataset ##########
+
+MasterPred <- predict(RFwoebaldata, newdata = woe.final, type = "prob")
+MasterPred.Resp <- factor(ifelse(MasterPred[,2] >= '0.16', "yes", "no"))
+
+conf_forest.16.woe.bal.final <- confusionMatrix(MasterPred.Resp, woe.final$Performance.Tag)
+
+conf_forest.16.woe.bal.final
+
+randomForest::varImpPlot(RFwoebaldata)
+
+## Accuracy : 0.7094  Sensitivity : 0.71740  Specificity : 0.52 
+## Model response on Master dataset reveals stability and genaralisability of model on unseen data
+
+#### (B) AUC and ROC ####
+
+# Create prediction object using 'yes' predicted probability and the actual response variable value.
+
+RFpred_obj <- ROCR::prediction(testPred.bal.rf[, 2],test_rf$Performance.Tag)
+
+# Calculate AUC.
+
+auc <- ROCR::performance(RFpred_obj, 'auc')
+auc <- unlist(slot(auc, 'y.values'))
+auc
+
+##  AUC = 0.6562873
+
+# Calculate TPR and PFR.
+
+tpr_fpr <- ROCR::performance(RFpred_obj, 'tpr','fpr')
+
+# Plot the ROC curve.
+
+plot(tpr_fpr, main = 'ROC Curve for Random Forest', col = 2, lwd = 2)
+abline(a = 0, b = 1, lwd = 2, lty = 2, col = 'gray')
+
+# Model predicted line is away from the random model line. This is an indication of a good model.
+
+#### (C) Gain Chart and Lift Chart ####
+
+RF_LG_Data <- test_rf
+
+# Appending the probabilities and response variables to the train data frame.
+
+# Model predicted probability.
+
+RF_LG_Data$pred.prob <- testPred[, 2]
+
+# Model predicted response variable value.
+
+RF_LG_Data$pred.resp <- testPred.Resp
+
+# Sorting the probabilities in decreasing order.
+
+RF_LG_Data <- RF_LG_Data[order(RF_LG_Data$pred.prob, decreasing = T), ]
+
+# Function to calculate Gain and Lift % for each of the 10 buckets.
+
+lift <- function(labels , predicted_prob, groups = 10) {
+  if(is.factor(labels)) labels  <- as.integer(as.character(labels ))
+  if(is.factor(predicted_prob)) predicted_prob <- as.integer(as.character(predicted_prob))
+  
+  helper = data.frame(cbind(labels , predicted_prob))
+  helper[, 'bucket'] = ntile(-helper[, 'predicted_prob'], groups)
+  
+  gaintable = helper %>% group_by(bucket) %>%
+    summarise_at(vars(labels ), funs(total = n(), totalresp = sum(., na.rm = TRUE))) %>%
+    mutate(Cumresp = cumsum(totalresp), Gain = Cumresp / sum(totalresp) * 100, Cumlift = Gain / (bucket * (100 / groups)))
+  
+  return(gaintable)
+}
+
+RF_LG_Data$Performance.Tag <- as.factor(ifelse(RF_LG_Data$Performance.Tag == 'yes', 1, 0))
+
+# Create a data frame which contains cumulative gain and lift % for each of the 10 buckets.
+
+LG <- lift(RF_LG_Data$Performance.Tag, RF_LG_Data$pred.prob, groups = 10)
+
+View(LG)
+
+# Plot the Gain Chart.
+
+plot(LG$bucket, LG$Gain, col = 'red', type = 'l', main = 'Gain Chart', xlab = '% of total targeted', 
+     ylab = '% of positive Response')
+
+# Using this model we could identify more than 70% of defaulters by the 4th Decile
+
+# Plot the Lift Chart.
+
+plot(LG$bucket, LG$Cumlift, col = 'red', type = 'l', main = 'Gain Chart', xlab = '% of total targeted', ylab = 'Lift')
+
+#### (D) KS-statistic ####
+
+actual_response <- ifelse(RF_LG_Data$Performance.Tag == 1, 1, 0)
+predicted_response <- ifelse(RF_LG_Data$pred.resp == 'yes', 1, 0)
+
+pred_object <- ROCR::prediction(actual_response, predicted_response)
+
+performance_measures <- ROCR::performance(pred_object, 'tpr', 'fpr')
+
+ks_table <- attr(performance_measures, 'y.values')[[1]] - attr(performance_measures, 'x.values')[[1]]
+
+max(ks_table) # 0.08026642
+
+## Reject Inference #####
+
+RejectData <- MasterData[is.na(MasterData$Performance.Tag),]
+RejectData <- RejectData[,-1]
+
+## Applying the same data prep steps as the master dataset 
+
+RejectData <- RejectData[,-c(1,2,3,4,5,6,7,8,9,10,23,24,25,26,27)]
+
+### Calculating the predictions for Reject data based on RF model 
+
+testPred.rej <- predict(RFdata,newdata = RejectData, type = "prob")
+
+### Using the given scorecard inputs on baseline score and 1:10 log odds
+
+score.rej <- 400 + 28.85*(log((1-testPred.rej)/testPred.rej)- log(10))
+
+### Scorecard for Rejected Applicants derived 
+
+RejectData$score <- score.rej[,2]
+
+## Credit Scorecard cut-off
+## To achieve 70% accuracy in Default prediction the cut-off has to be at 0.16
+
+400 + 28.85*(log((1-0.16)/0.16)) # 381 is the cut-off 
+
+Reject.business <- subset(RejectData, RejectData$score > 381)
+
+## Loss of Business due to reject Applications
+
+Reject.business <- subset(RejectData, RejectData$score > 381) # 816 Applicants with good credit scores
+
+## Credit Loss avoided 
+
+Master.business <- subset(MasterData1, MasterData1$creditscore > 381)
+
+# 1075 (68869 - 67794) customers would be rejected
+
